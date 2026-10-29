@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from fixture import PASSWORD, SALT, ITERATIONS, Server, packet, recv_packet
+from fixture import PASSWORD, SALT, ITERATIONS, Server, attrs, packet, recv_packet
 
 class ProtocolFixture(unittest.TestCase):
     @classmethod
@@ -28,7 +28,7 @@ class ProtocolFixture(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def plus_client(self, port, ca=None, hostname='localhost', corrupt_proof=False, corrupt_binding=False, expect_valid=True):
+    def plus_client(self, port, ca=None, hostname='localhost', corrupt_proof=False, corrupt_binding=False, expect_valid=True, username=b'fixture-user'):
         ctx = ssl.create_default_context(cafile=ca or self.cert)
         with socket.create_connection(('127.0.0.1', port), timeout=3) as raw:
             raw.sendall(struct.pack('!II', 8, 80877103))
@@ -42,7 +42,7 @@ class ProtocolFixture(unittest.TestCase):
                 if code != 10 or b'SCRAM-SHA-256-PLUS\0' not in body[4:]:
                     return False
                 gs2 = b'p=tls-server-end-point,,'
-                first_bare = b'n=fixture-user,r=clientnonce'
+                first_bare = b'n=' + username + b',r=clientnonce'
                 first = gs2 + first_bare
                 conn.sendall(packet(b'p', b'SCRAM-SHA-256-PLUS\0' + struct.pack('!i', len(first)) + first))
                 kind, body = recv_packet(conn)
@@ -83,6 +83,25 @@ class ProtocolFixture(unittest.TestCase):
         self.assertTrue(s.bound and s.proof_valid)
         self.assertEqual(s.queries, 0)
         self.assertIsNone(s.error)
+
+    def test_libpq_empty_username_still_verifies_binding_and_proof(self):
+        with Server(self.cert, self.key) as s:
+            self.assertTrue(self.plus_client(s.port, username=b''))
+        self.assertEqual(s.chosen, 'SCRAM-SHA-256-PLUS')
+        self.assertTrue(s.bound and s.proof_valid)
+        self.assertEqual(s.queries, 0)
+        self.assertIsNone(s.error)
+        for keyword in ('corrupt_binding', 'corrupt_proof'):
+            with self.subTest(keyword=keyword), Server(self.cert, self.key) as s:
+                self.plus_client(s.port, username=b'', expect_valid=False, **{keyword: True})
+            self.assertFalse(s.bound and s.proof_valid)
+            self.assertEqual(s.queries, 0)
+
+    def test_empty_attribute_is_permitted_only_for_first_message_username(self):
+        self.assertEqual(attrs(b'n=,r=nonce', allow_empty_username=True), {'n': '', 'r': 'nonce'})
+        for value, allow in [(b'n=', False), (b'r=', True), (b'c=', True), (b'n=,n=x', True), (b'r=', False)]:
+            with self.subTest(value=value, allow=allow), self.assertRaises(ValueError):
+                attrs(value, allow_empty_username=allow)
 
     def test_fixture_rejects_tampered_binding_or_proof(self):
         for keyword in ('corrupt_binding', 'corrupt_proof'):

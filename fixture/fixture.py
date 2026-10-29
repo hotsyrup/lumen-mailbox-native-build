@@ -40,10 +40,11 @@ def recv_packet(sock):
     size = struct.unpack('!I', readn(sock, 4))[0]
     return kind, readn(sock, size - 4)
 
-def attrs(message):
+def attrs(message, allow_empty_username=False):
     values = {}
     for field in message.decode('ascii').split(','):
-        if len(field) < 3 or field[1] != '=' or field[0] in values:
+        if (len(field) < 2 or field[1] != '=' or field[0] in values or
+                (len(field) == 2 and not (allow_empty_username and field == 'n='))):
             raise ValueError('bad SCRAM attribute')
         values[field[0]] = field[2:]
     return values
@@ -144,7 +145,7 @@ class Server:
                         if n != len(first) or not first.startswith(b'p=tls-server-end-point,,'):
                             raise ValueError('invalid GS2 header')
                         first_bare = first[len(b'p=tls-server-end-point,,'):]
-                        nonce = attrs(first_bare).get('r', '')
+                        nonce = attrs(first_bare, allow_empty_username=True).get('r', '')
                         if not nonce or ',' in nonce:
                             raise ValueError('invalid nonce')
                         server_first = ('r=' + nonce + 'fixture-server-nonce,s=' + base64.b64encode(SALT).decode() + ',i=' + str(ITERATIONS)).encode()
