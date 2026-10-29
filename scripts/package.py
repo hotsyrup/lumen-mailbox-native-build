@@ -10,6 +10,10 @@ import sys
 import zipfile
 
 root = Path.cwd()
+archive = root / 'dist' / 'native-dependencies.zip'
+# A failed rebuild must not leave an earlier ZIP looking like fresh output.
+# unlink removes a symlink itself, never its target, and errors fail closed.
+archive.unlink(missing_ok=True)
 expected_libpq = Path(sys.argv[1]).resolve()
 node_modules = root / 'node_modules'
 stage = root / 'dist' / 'package'
@@ -17,8 +21,14 @@ if stage.exists():
     shutil.rmtree(stage)
 stage.mkdir(parents=True)
 
-def ignore(_directory, names):
-    return {name for name in names if name in {'.bin', '.cache', '__pycache__'}}
+def ignore(directory, names):
+    ignored = {name for name in names if name in {'.bin', '.cache', '__pycache__'}}
+    # These two upstream READMEs are not runtime inputs and contain example
+    # user paths. Exclude only these exact docs; keep licenses and code, and
+    # run the unchanged fail-closed scan on every remaining staged file.
+    if Path(directory) in {node_modules / 'nan', node_modules / 'bindings'} and 'README.md' in names:
+        ignored.add('README.md')
+    return ignored
 
 shutil.copytree(node_modules, stage / 'node_modules', ignore=ignore, symlinks=False)
 source = node_modules / 'libpq' / 'build' / 'Release'
@@ -119,18 +129,26 @@ if len(files) > 4096 or size > 64 * 1024 * 1024:
     raise SystemExit('Unpacked dependency archive exceeds Function limits')
 # Bounded privacy scan of names and file bytes; this cannot prove absence of
 # every possible secret, so the public source and package still need review.
-needles = [b'/Users/', b'/home/runner/', b'/workspace/',
-           b'-----BEGIN PRIVATE KEY-----', b'-----BEGIN RSA PRIVATE KEY-----',
-           b'-----BEGIN EC PRIVATE KEY-----', b'-----BEGIN OPENSSH PRIVATE KEY-----', b'nsec1']
-for candidate in (os.environ.get('HOME'), os.environ.get('GITHUB_WORKSPACE'), sys.argv[3] if len(sys.argv) > 3 else None):
+needles = [(b'/Users/', 'user_path'), (b'/home/runner/', 'runner_path'), (b'/workspace/', 'workspace_path'),
+           (b'-----BEGIN PRIVATE KEY-----', 'private_key'), (b'-----BEGIN RSA PRIVATE KEY-----', 'private_key'),
+           (b'-----BEGIN EC PRIVATE KEY-----', 'private_key'), (b'-----BEGIN OPENSSH PRIVATE KEY-----', 'private_key'),
+           (b'nsec1', 'nostr_secret')]
+for candidate, category in ((os.environ.get('HOME'), 'home_path'),
+                            (os.environ.get('GITHUB_WORKSPACE'), 'workspace_env_path'),
+                            (sys.argv[3] if len(sys.argv) > 3 else None, 'build_path')):
     if candidate and candidate != '/':
-        needles.append(candidate.encode())
+        needles.append((candidate.encode(), category))
 for path in files:
     data = path.read_bytes()
-    name = path.relative_to(stage).as_posix().encode()
-    if any(needle in data or needle in name for needle in needles):
-        raise SystemExit('Staged archive failed a bounded privacy marker scan')
-archive = root / 'dist' / 'native-dependencies.zip'
+    relative = path.relative_to(stage)
+    name = relative.as_posix().encode()
+    location = ('native' if relative.parts[0] == 'native' or path.suffix == '.node'
+                else 'dependency' if relative.parts[0] == 'node_modules' else 'metadata')
+    for needle, category in needles:
+        if needle in data or needle in name:
+            # Both fields come exclusively from fixed lists; never report the
+            # file name, marker bytes, environment values, or matched content.
+            raise SystemExit(f'Staged archive failed a bounded privacy marker scan: marker={category} location={location}')
 with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
     for path in files:
         name = path.relative_to(stage).as_posix()
